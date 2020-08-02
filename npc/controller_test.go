@@ -2,6 +2,7 @@ package npc
 
 import (
 	"fmt"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"log"
 	"strings"
 	"testing"
@@ -696,5 +697,59 @@ func TestIngressPolicyWithIPBlockAndPortSpecified(t *testing.T) {
 	require.Equal(t, 1, len(ipt.rules[IngressChain]))
 	for rule := range ipt.rules[IngressChain] {
 		require.Contains(t, rule, "-s 192.168.48.4/32 -m set --match-set "+runBarIPSetName+" dst --dport 80")
+	}
+}
+
+
+func TestPodNamespaceOrdering(t *testing.T) {
+	// Test for race condition between namespace and pod events
+	// https://github.com/weaveworks/weave/issues/3836
+
+	namespace := &coreapi.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "default",
+			UID:  "default",
+			Labels: map[string]string{
+				"app": "default",
+			},
+		},
+	}
+
+	pod := &coreapi.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			UID:       "pod",
+			Name:      "pod",
+			Namespace: "default",
+			Labels:    map[string]string{"run": "bar"}},
+	}
+
+	m := newMockIPSet()
+	client := fake.NewSimpleClientset()
+	controller := New("foo", newMockIPTables(), &m, client)
+
+	//deleteOption := metav1.DeletePropagationOrphan
+
+	for i := 0; i < 10000; i++ {
+		client.CoreV1().Namespaces().Create(namespace)
+		client.CoreV1().Pods("default").Create(pod)
+
+		var wg wait.Group
+
+		controller.AddNamespace(namespace)
+		controller.AddPod(pod)
+
+		//wg.Start(func() {
+		//	client.CoreV1().Namespaces().Delete(namespace.Name, &metav1.DeleteOptions{})
+		//})
+
+		wg.Start(func() {
+			client.CoreV1().Pods("default").Delete(pod.Name, &metav1.DeleteOptions{})
+		})
+
+		wg.Start(func() { controller.DeletePod(pod) })
+
+		//wg.Start(func() { controller.DeleteNamespace(namespace) })
+
+		wg.Wait()
 	}
 }
